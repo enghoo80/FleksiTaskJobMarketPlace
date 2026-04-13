@@ -1,0 +1,17 @@
+backend/.env
+backend/firebase-credentials.json
+frontend/web/.env
+frontend/admin/.env
+frontend/mobile/.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.venv-*/
+node_modules/
+dist/
+build/
+.DS_Store
+*.log
+media/
+staticfiles/

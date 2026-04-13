@@ -1,0 +1,82 @@
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { applicationsApi } from '../api/tasks'
+
+const STATUS_STYLES = {
+  pending: 'bg-yellow-100 text-yellow-700',
+  approved: 'bg-green-100 text-green-700',
+  rejected: 'bg-red-100 text-red-600',
+  withdrawn: 'bg-gray-100 text-gray-600',
+}
+
+export default function MyApplications() {
+  const [applications, setApplications] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    applicationsApi.getMyApplications()
+      .then(setApplications)
+      .catch(() => setError('Failed to load applications'))
+      .finally(() => setLoading(false))
+  }, [])
+
+  if (loading) return (
+    <div className="max-w-3xl mx-auto px-4 py-8 space-y-3">
+      {[1,2,3].map(i => <div key={i} className="card animate-pulse h-24" />)}
+    </div>
+  )
+
+  return (
+    <div className="max-w-3xl mx-auto px-4 py-8">
+      <h1 className="text-2xl font-bold text-gray-900 mb-6">My Applications</h1>
+
+      {error && <div className="bg-red-50 text-red-700 border border-red-200 rounded-lg p-3 text-sm mb-4">{error}</div>}
+
+      {applications.length === 0 ? (
+        <div className="text-center py-16 text-gray-500">
+          <p className="text-4xl mb-3">📋</p>
+          <p className="font-medium">No applications yet</p>
+          <Link to="/" className="text-primary-600 text-sm hover:underline mt-2 inline-block">Browse available tasks →</Link>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {applications.map((app) => (
+            <div key={app.id} className="card">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                  {app.task ? (
+                    <>
+                      <Link to={`/tasks/${app.task_id}`} className="font-semibold text-gray-900 hover:text-primary-600 truncate block">
+                        {app.task.title}
+                      </Link>
+                      <p className="text-sm text-gray-500 flex items-center gap-1 mt-0.5">
+                        📍 {app.task.location}
+                      </p>
+                      <p className="text-sm text-primary-600 font-medium mt-1">
+                        ${(app.task.pay_rate_per_minute * app.task.estimated_duration_minutes).toFixed(2)} total
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-gray-500 text-sm">Task details unavailable</p>
+                  )}
+                </div>
+                <div className="text-right shrink-0">
+                  <span className={`inline-block text-xs font-medium px-2.5 py-1 rounded-full capitalize ${STATUS_STYLES[app.status]}`}>
+                    {app.status}
+                  </span>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {new Date(app.created_at).toLocaleDateString()}
+                  </p>
+                </div>
+              </div>
+              {app.cover_note && (
+                <p className="text-xs text-gray-500 mt-2 pt-2 border-t border-gray-100 italic">"{app.cover_note}"</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}

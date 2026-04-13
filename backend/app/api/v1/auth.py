@@ -1,0 +1,121 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+
+from app.database import get_db
+from app.models.user import User
+from app.schemas.auth import TokenResponse, GoogleAuthRequest, LoginRequest, RefreshTokenRequest
+from app.schemas.user import UserCreate
+from app.core.security import verify_password, create_token_pair, decode_token, hash_password
+from app.core.redis_client import invalidate_token, is_token_blacklisted
+from app.core.deps import oauth2_scheme
+from app.config import get_settings
+
+router = APIRouter(prefix="/auth", tags=["Authentication"])
+settings = get_settings()
+
+
+@router.post("/google", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+async def google_auth(payload: GoogleAuthRequest, db: AsyncSession = Depends(get_db)):
+    """Authenticate or register via Google OAuth."""
+    try:
+        id_info = id_token.verify_oauth2_token(
+            payload.id_token,
+            google_requests.Request(),
+            settings.GOOGLE_CLIENT_ID,
+        )
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google token")
+
+    google_id = id_info["sub"]
+    email = id_info.get("email", "")
+    full_name = id_info.get("name", "")
+    picture = id_info.get("picture")
+
+    result = await db.execute(select(User).where(User.google_id == google_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        if user:
+            user.google_id = google_id
+        else:
+            user = User(
+                email=email,
+                full_name=full_name,
+                google_id=google_id,
+                profile_photo_url=picture,
+                is_verified=True,
+            )
+            db.add(user)
+            await db.flush()
+
+    access_token, refresh_token = create_token_pair(user.id)
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)):
+    """Register a new user with email and password."""
+    if not payload.password:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Password is required")
+
+    result = await db.execute(select(User).where(User.email == payload.email))
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+
+    user = User(
+        email=payload.email,
+        full_name=payload.full_name,
+        hashed_password=hash_password(payload.password),
+        is_verified=False,
+    )
+    db.add(user)
+    await db.flush()
+
+    access_token, refresh_token = create_token_pair(user.id)
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
+@router.post("/login", response_model=TokenResponse)
+async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
+    """Email/password login."""
+    result = await db.execute(select(User).where(User.email == payload.email))
+    user = result.scalar_one_or_none()
+    if not user or not user.hashed_password or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is inactive")
+
+    access_token, refresh_token = create_token_pair(user.id)
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token(payload: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
+    """Refresh access token using a valid refresh token."""
+    if await is_token_blacklisted(payload.refresh_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
+
+    token_data = decode_token(payload.refresh_token)
+    if token_data.get("type") != "refresh":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+
+    import uuid as _uuid
+    result = await db.execute(select(User).where(User.id == _uuid.UUID(token_data["sub"])))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    await invalidate_token(payload.refresh_token, ttl=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400)
+    access_token, new_refresh_token = create_token_pair(user.id)
+    return TokenResponse(access_token=access_token, refresh_token=new_refresh_token)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(token: str = Depends(oauth2_scheme)):
+    """Blacklist the current access token."""
+    await invalidate_token(token, ttl=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
