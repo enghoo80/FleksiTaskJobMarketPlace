@@ -1,8 +1,11 @@
 from fastapi import APIRouter
-from app.api.v1 import auth, users, tasks, applications
+from app.api.v1 import auth, users, tasks, applications, task_sessions, admin, messages
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(auth.router)
 router.include_router(users.router)
 router.include_router(tasks.router)
 router.include_router(applications.router)
+router.include_router(task_sessions.router)
+router.include_router(admin.router)
+router.include_router(messages.router)

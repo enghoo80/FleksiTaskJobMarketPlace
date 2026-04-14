@@ -38,3 +38,31 @@ export const applicationsApi = {
     return data
   },
 }
+
+export const taskSessionsApi = {
+  checkIn: async (applicationId) => {
+    const { data } = await api.post('/task-sessions/checkin', { application_id: applicationId })
+    return data
+  },
+  checkOut: async (sessionId, proofNotes, proofPhoto) => {
+    const form = new FormData()
+    if (proofNotes) form.append('proof_notes', proofNotes)
+    if (proofPhoto) form.append('proof_photo', proofPhoto)
+    const { data } = await api.post(`/task-sessions/${sessionId}/checkout`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return data
+  },
+  getEarnings: async (sessionId) => {
+    const { data } = await api.get(`/task-sessions/${sessionId}/earnings`)
+    return data
+  },
+  getMySessions: async () => {
+    const { data } = await api.get('/task-sessions/my')
+    return data
+  },
+  getActiveSession: async () => {
+    const { data } = await api.get('/task-sessions/active')
+    return data
+  },
+}

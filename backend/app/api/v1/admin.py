@@ -1,0 +1,190 @@
+import uuid
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, and_
+from pydantic import BaseModel
+from datetime import datetime
+
+from app.database import get_db
+from app.models.application import Application, ApplicationStatus
+from app.models.task import Task
+from app.models.user import User
+from app.models.task_session import TaskSession, SessionStatus
+from app.schemas.application import ApplicationWithDetails
+from app.schemas.user import UserResponse, UserPublic
+from app.schemas.task import TaskResponse
+from app.core.deps import get_current_user
+
+router = APIRouter(prefix="/admin", tags=["Admin"])
+
+
+async def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_user
+
+
+# ── Applications ──────────────────────────────────────────────────────────────
+
+@router.get("/applications", response_model=list[ApplicationWithDetails])
+async def admin_list_applications(
+    task_id: uuid.UUID | None = Query(None),
+    app_status: str | None = Query(None, alias="status"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """List all applications, optionally filtered by task or status."""
+    filters = []
+    if task_id:
+        filters.append(Application.task_id == task_id)
+    if app_status:
+        filters.append(Application.status == app_status)
+
+    q = select(Application).order_by(Application.created_at.desc())
+    if filters:
+        q = q.where(and_(*filters))
+    result = await db.execute(q)
+    applications = result.scalars().all()
+
+    response = []
+    for app in applications:
+        app_data = ApplicationWithDetails.model_validate(app)
+        task_result = await db.execute(select(Task).where(Task.id == app.task_id))
+        task = task_result.scalar_one_or_none()
+        if task:
+            count_result = await db.execute(select(func.count()).select_from(Application).where(Application.task_id == task.id))
+            td = TaskResponse.model_validate(task)
+            td.application_count = count_result.scalar_one()
+            app_data.task = td
+        worker_result = await db.execute(select(User).where(User.id == app.worker_id))
+        worker = worker_result.scalar_one_or_none()
+        if worker:
+            app_data.worker = UserPublic.model_validate(worker)
+        response.append(app_data)
+    return response
+
+
+# ── Users / Workers ───────────────────────────────────────────────────────────
+
+class WorkerStats(BaseModel):
+    total_sessions: int
+    completed_sessions: int
+    total_earnings: float
+
+
+class UserWithStats(UserResponse):
+    stats: WorkerStats | None = None
+
+
+@router.get("/users", response_model=list[UserResponse])
+async def admin_list_users(
+    search: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """List all users."""
+    q = select(User).order_by(User.created_at.desc())
+    result = await db.execute(q)
+    users = result.scalars().all()
+    if search:
+        s = search.lower()
+        users = [u for u in users if s in u.full_name.lower() or s in u.email.lower()]
+    return [UserResponse.model_validate(u) for u in users]
+
+
+@router.get("/users/{user_id}", response_model=UserWithStats)
+async def admin_get_user(
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Get a user's profile with session performance stats."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    sessions_result = await db.execute(select(TaskSession).where(TaskSession.worker_id == user_id))
+    sessions = sessions_result.scalars().all()
+    completed = [s for s in sessions if s.status == SessionStatus.COMPLETED]
+    total_earnings = sum(s.earnings or 0 for s in completed)
+
+    user_data = UserWithStats.model_validate(user)
+    user_data.stats = WorkerStats(
+        total_sessions=len(sessions),
+        completed_sessions=len(completed),
+        total_earnings=round(total_earnings, 2),
+    )
+    return user_data
+
+
+@router.get("/users/{user_id}/sessions")
+async def admin_get_user_sessions(
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Get all task sessions for a worker (past performance)."""
+    sessions_result = await db.execute(
+        select(TaskSession).where(TaskSession.worker_id == user_id).order_by(TaskSession.created_at.desc())
+    )
+    sessions = sessions_result.scalars().all()
+    out = []
+    for s in sessions:
+        task_result = await db.execute(select(Task).where(Task.id == s.task_id))
+        task = task_result.scalar_one_or_none()
+        elapsed = None
+        if s.checked_in_at and s.checked_out_at:
+            elapsed = round((s.checked_out_at - s.checked_in_at).total_seconds() / 60, 1)
+        out.append({
+            "id": str(s.id),
+            "task_title": task.title if task else "Unknown",
+            "task_location": task.location if task else "",
+            "checked_in_at": s.checked_in_at.isoformat() if s.checked_in_at else None,
+            "checked_out_at": s.checked_out_at.isoformat() if s.checked_out_at else None,
+            "elapsed_minutes": elapsed,
+            "earnings": s.earnings,
+            "status": s.status,
+            "proof_notes": s.proof_notes,
+            "proof_photo_url": s.proof_photo_url,
+        })
+    return out
+
+
+# ── Active Workers ────────────────────────────────────────────────────────────
+
+@router.get("/workers/active")
+async def admin_active_workers(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """List all workers currently checked in (active sessions)."""
+    result = await db.execute(
+        select(TaskSession).where(TaskSession.status == SessionStatus.ACTIVE)
+        .order_by(TaskSession.checked_in_at.asc())
+    )
+    sessions = result.scalars().all()
+    out = []
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    for s in sessions:
+        worker_result = await db.execute(select(User).where(User.id == s.worker_id))
+        worker = worker_result.scalar_one_or_none()
+        task_result = await db.execute(select(Task).where(Task.id == s.task_id))
+        task = task_result.scalar_one_or_none()
+        elapsed = round((now - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60, 1)
+        current_earnings = round(elapsed * (task.pay_rate_per_minute if task else 0), 2)
+        out.append({
+            "session_id": str(s.id),
+            "worker_id": str(s.worker_id),
+            "worker_name": worker.full_name if worker else "Unknown",
+            "worker_email": worker.email if worker else "",
+            "worker_photo": worker.profile_photo_url if worker else None,
+            "task_id": str(s.task_id),
+            "task_title": task.title if task else "Unknown",
+            "task_location": task.location if task else "",
+            "checked_in_at": s.checked_in_at.isoformat(),
+            "elapsed_minutes": elapsed,
+            "current_earnings": current_earnings,
+        })
+    return out

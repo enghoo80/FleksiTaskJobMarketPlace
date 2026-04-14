@@ -1,6 +1,7 @@
 import uuid
 import math
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import os
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 from sqlalchemy.orm import selectinload
@@ -128,3 +129,45 @@ async def delete_task(
     if task.employer_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
     await db.delete(task)
+
+
+@router.post("/{task_id}/photo", response_model=TaskResponse)
+async def upload_task_photo(
+    task_id: uuid.UUID,
+    photo: UploadFile = File(...),
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload or replace a task photo."""
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    if task.employer_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    ext = os.path.splitext(photo.filename)[1].lower()
+    if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid image type")
+
+    from app.config import get_settings
+    _settings = get_settings()
+    os.makedirs(_settings.MEDIA_DIR, exist_ok=True)
+    filename = f"task_{task_id}{ext}"
+    save_path = os.path.join(_settings.MEDIA_DIR, filename)
+    size = 0
+    with open(save_path, "wb") as f:
+        while chunk := await photo.read(65536):
+            size += len(chunk)
+            if size > _settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+                raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="File too large")
+            f.write(chunk)
+
+    task.photo_url = f"/media/{filename}"
+    db.add(task)
+    await db.flush()
+
+    count_result = await db.execute(select(func.count()).select_from(Application).where(Application.task_id == task.id))
+    task_data = TaskResponse.model_validate(task)
+    task_data.application_count = count_result.scalar_one()
+    return task_data

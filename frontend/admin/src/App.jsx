@@ -10,6 +10,7 @@ import Dashboard from './pages/Dashboard'
 import Users from './pages/Users'
 import Tasks from './pages/Tasks'
 import Applications from './pages/Applications'
+import ActiveWorkers from './pages/ActiveWorkers'
 
 function AdminRoute({ children }) {
   const { token, user } = useSelector((s) => s.auth)
@@ -40,6 +41,7 @@ export default function App() {
                   <Route path="/users" element={<Users />} />
                   <Route path="/tasks" element={<Tasks />} />
                   <Route path="/applications" element={<Applications />} />
+                  <Route path="/active-workers" element={<ActiveWorkers />} />
                 </Routes>
               </main>
             </div>

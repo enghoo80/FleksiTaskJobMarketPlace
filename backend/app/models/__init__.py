@@ -1,5 +1,7 @@
 from app.models.user import User
 from app.models.task import Task, TaskStatus
 from app.models.application import Application, ApplicationStatus
+from app.models.task_session import TaskSession, SessionStatus
+from app.models.message import Message
 
-__all__ = ["User", "Task", "TaskStatus", "Application", "ApplicationStatus"]
+__all__ = ["User", "Task", "TaskStatus", "Application", "ApplicationStatus", "TaskSession", "SessionStatus", "Message"]

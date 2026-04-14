@@ -7,6 +7,7 @@ const links = [
   { to: '/users', label: 'Users', icon: '👥' },
   { to: '/tasks', label: 'Tasks', icon: '📋' },
   { to: '/applications', label: 'Applications', icon: '📝' },
+  { to: '/active-workers', label: 'Active Workers', icon: '🟢' },
 ]
 
 export default function Sidebar() {

@@ -49,12 +49,14 @@ class TaskUpdate(BaseModel):
     max_applicants: int | None = None
     starts_at: datetime | None = None
     status: TaskStatus | None = None
+    photo_url: str | None = None
 
 
 class TaskResponse(TaskBase):
     id: uuid.UUID
     employer_id: uuid.UUID
     status: TaskStatus
+    photo_url: str | None = None
     application_count: int = 0
     created_at: datetime
     updated_at: datetime

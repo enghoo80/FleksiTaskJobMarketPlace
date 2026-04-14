@@ -1,0 +1,281 @@
+import { useEffect, useState, useRef, useCallback } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { toast } from 'react-toastify'
+import { taskSessionsApi, applicationsApi, tasksApi } from '../api/tasks'
+
+function formatDuration(seconds) {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  return [h > 0 ? `${h}h` : null, `${m}m`, `${s}s`].filter(Boolean).join(' ')
+}
+
+export default function TaskTracking() {
+  const { applicationId } = useParams()
+  const navigate = useNavigate()
+
+  const [task, setTask] = useState(null)
+  const [session, setSession] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [actionLoading, setActionLoading] = useState(false)
+
+  // Elapsed seconds (ticks every second while active)
+  const [elapsed, setElapsed] = useState(0)
+  const timerRef = useRef(null)
+
+  // Checkout form
+  const [proofNotes, setProofNotes] = useState('')
+  const [proofPhoto, setProofPhoto] = useState(null)
+  const [photoPreview, setPhotoPreview] = useState(null)
+  const [showCheckout, setShowCheckout] = useState(false)
+
+  const startTimer = useCallback((checkedInAt) => {
+    clearInterval(timerRef.current)
+    timerRef.current = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - new Date(checkedInAt).getTime()) / 1000))
+    }, 1000)
+  }, [])
+
+  useEffect(() => {
+    async function load() {
+      try {
+        // Load application to get task info
+        const apps = await applicationsApi.getMyApplications()
+        const app = apps.find((a) => a.id === applicationId)
+        if (!app) { navigate('/my-applications'); return }
+
+        const taskData = await tasksApi.getById(app.task_id)
+        setTask(taskData)
+
+        // Check for existing active session on this application
+        const sessions = await taskSessionsApi.getMySessions()
+        const existing = sessions.find((s) => s.application_id === applicationId)
+        if (existing) {
+          setSession(existing)
+          if (existing.status === 'active') {
+            const secs = Math.floor((Date.now() - new Date(existing.checked_in_at).getTime()) / 1000)
+            setElapsed(secs)
+            startTimer(existing.checked_in_at)
+          }
+        }
+      } catch {
+        toast.error('Failed to load task tracking info')
+      } finally {
+        setLoading(false)
+      }
+    }
+    load()
+    return () => clearInterval(timerRef.current)
+  }, [applicationId, navigate, startTimer])
+
+  const handleCheckIn = async () => {
+    setActionLoading(true)
+    try {
+      const newSession = await taskSessionsApi.checkIn(applicationId)
+      setSession(newSession)
+      setElapsed(0)
+      startTimer(newSession.checked_in_at)
+      toast.success('Checked in! Your time is now being tracked.')
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Check-in failed')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleCheckOut = async () => {
+    setActionLoading(true)
+    try {
+      const completed = await taskSessionsApi.checkOut(session.id, proofNotes, proofPhoto)
+      clearInterval(timerRef.current)
+      setSession(completed)
+      setShowCheckout(false)
+      toast.success(`Checked out! You earned $${completed.earnings?.toFixed(2)}`)
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Check-out failed')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handlePhotoChange = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    setProofPhoto(file)
+    setPhotoPreview(URL.createObjectURL(file))
+  }
+
+  if (loading) return (
+    <div className="max-w-lg mx-auto px-4 py-12 space-y-4">
+      {[1, 2, 3].map(i => <div key={i} className="h-20 bg-gray-100 rounded-xl animate-pulse" />)}
+    </div>
+  )
+
+  const payRate = task?.pay_rate_per_minute ?? 0
+  const currentEarnings = session?.status === 'completed'
+    ? session.earnings
+    : (elapsed / 60) * payRate
+
+  return (
+    <div className="max-w-lg mx-auto px-4 py-8 space-y-5">
+      {/* Task Header */}
+      <div className="card">
+        <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Task</p>
+        <h1 className="text-xl font-bold text-gray-900">{task?.title}</h1>
+        <p className="text-sm text-gray-500 mt-1">📍 {task?.location}</p>
+        <p className="text-sm text-primary-600 font-medium mt-1">
+          ${payRate.toFixed(4)}/min &nbsp;·&nbsp; Est. {task?.estimated_duration_minutes} min
+        </p>
+      </div>
+
+      {/* Status Card */}
+      {!session ? (
+        <div className="card text-center space-y-4">
+          <p className="text-4xl">🕐</p>
+          <p className="text-gray-600 font-medium">Ready to start work?</p>
+          <p className="text-sm text-gray-400">Check in to begin tracking your time and earnings.</p>
+          <button
+            onClick={handleCheckIn}
+            disabled={actionLoading}
+            className="w-full py-3 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-xl transition-colors disabled:opacity-50"
+          >
+            {actionLoading ? 'Checking in…' : '✅ Check In & Start Work'}
+          </button>
+        </div>
+      ) : session.status === 'active' ? (
+        <div className="space-y-4">
+          {/* Live earnings ticker */}
+          <div className="card bg-green-50 border border-green-200 text-center space-y-2">
+            <p className="text-xs text-green-600 uppercase tracking-wide font-semibold">Live Earnings</p>
+            <p className="text-4xl font-bold text-green-700">${currentEarnings.toFixed(2)}</p>
+            <p className="text-sm text-green-600">⏱ {formatDuration(elapsed)} elapsed</p>
+            <div className="w-full bg-green-100 rounded-full h-2 mt-2">
+              <div
+                className="bg-green-500 h-2 rounded-full transition-all duration-1000"
+                style={{ width: `${Math.min(100, (elapsed / (task.estimated_duration_minutes * 60)) * 100)}%` }}
+              />
+            </div>
+            <p className="text-xs text-green-500">Est. total: ${(payRate * task.estimated_duration_minutes).toFixed(2)}</p>
+          </div>
+
+          {/* Check-out section */}
+          {!showCheckout ? (
+            <button
+              onClick={() => setShowCheckout(true)}
+              className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl transition-colors"
+            >
+              🏁 Check Out
+            </button>
+          ) : (
+            <div className="card space-y-4">
+              <h2 className="font-semibold text-gray-900">Submit Completion Proof</h2>
+
+              {/* Photo upload */}
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-2">
+                  Photo Proof <span className="text-gray-400">(optional)</span>
+                </label>
+                <label className="flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-xl p-4 cursor-pointer hover:border-primary-400 transition-colors">
+                  {photoPreview ? (
+                    <img src={photoPreview} alt="proof" className="max-h-40 rounded-lg object-cover" />
+                  ) : (
+                    <>
+                      <span className="text-3xl mb-1">📷</span>
+                      <span className="text-sm text-gray-500">Tap to upload photo</span>
+                      <span className="text-xs text-gray-400">JPG, PNG, WebP · max 5MB</span>
+                    </>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    className="hidden"
+                    onChange={handlePhotoChange}
+                  />
+                </label>
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Notes <span className="text-gray-400">(optional)</span>
+                </label>
+                <textarea
+                  rows={3}
+                  value={proofNotes}
+                  onChange={(e) => setProofNotes(e.target.value)}
+                  placeholder="Describe what you completed…"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none"
+                />
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowCheckout(false)}
+                  className="flex-1 py-2.5 border border-gray-300 text-gray-700 rounded-xl font-medium text-sm hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCheckOut}
+                  disabled={actionLoading}
+                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold text-sm transition-colors disabled:opacity-50"
+                >
+                  {actionLoading ? 'Submitting…' : 'Confirm Check Out'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Completed */
+        <div className="card text-center space-y-4">
+          <p className="text-5xl">🎉</p>
+          <h2 className="text-xl font-bold text-gray-900">Work Completed!</h2>
+
+          <div className="bg-green-50 rounded-xl p-4 space-y-2">
+            <p className="text-sm text-gray-500">Total Earnings</p>
+            <p className="text-3xl font-bold text-green-700">${session.earnings?.toFixed(2)}</p>
+          </div>
+
+          <div className="text-left space-y-2 border-t border-gray-100 pt-3">
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-500">Checked in</span>
+              <span className="text-gray-700">{new Date(session.checked_in_at).toLocaleTimeString()}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-500">Checked out</span>
+              <span className="text-gray-700">{new Date(session.checked_out_at).toLocaleTimeString()}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-500">Duration</span>
+              <span className="text-gray-700">
+                {formatDuration(Math.floor((new Date(session.checked_out_at) - new Date(session.checked_in_at)) / 1000))}
+              </span>
+            </div>
+          </div>
+
+          {session.proof_notes && (
+            <div className="bg-gray-50 rounded-lg p-3 text-left">
+              <p className="text-xs text-gray-500 mb-1">Your notes</p>
+              <p className="text-sm text-gray-700">{session.proof_notes}</p>
+            </div>
+          )}
+          {session.proof_photo_url && (
+            <img
+              src={session.proof_photo_url}
+              alt="Completion proof"
+              className="w-full rounded-xl object-cover max-h-48"
+            />
+          )}
+
+          <button
+            onClick={() => navigate('/my-applications')}
+            className="w-full py-2.5 border border-gray-300 rounded-xl text-sm font-medium hover:bg-gray-50"
+          >
+            ← Back to My Applications
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}

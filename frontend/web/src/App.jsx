@@ -11,6 +11,7 @@ import Register from './pages/Register'
 import Profile from './pages/Profile'
 import TaskDetail from './pages/TaskDetail'
 import MyApplications from './pages/MyApplications'
+import TaskTracking from './pages/TaskTracking'
 
 function PrivateRoute({ children }) {
   const token = useSelector((s) => s.auth.accessToken)
@@ -37,6 +38,7 @@ export default function App() {
             <Route path="/tasks/:id" element={<TaskDetail />} />
             <Route path="/profile" element={<PrivateRoute><Profile /></PrivateRoute>} />
             <Route path="/my-applications" element={<PrivateRoute><MyApplications /></PrivateRoute>} />
+            <Route path="/track/:applicationId" element={<PrivateRoute><TaskTracking /></PrivateRoute>} />
           </Routes>
         </main>
       </div>

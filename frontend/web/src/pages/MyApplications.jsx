@@ -73,6 +73,16 @@ export default function MyApplications() {
               {app.cover_note && (
                 <p className="text-xs text-gray-500 mt-2 pt-2 border-t border-gray-100 italic">"{app.cover_note}"</p>
               )}
+              {app.status === 'approved' && (
+                <div className="mt-3 pt-3 border-t border-gray-100">
+                  <Link
+                    to={`/track/${app.id}`}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-xs font-semibold rounded-lg transition-colors"
+                  >
+                    ⏱ Track Work
+                  </Link>
+                </div>
+              )}
             </div>
           ))}
         </div>
