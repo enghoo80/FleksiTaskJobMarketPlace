@@ -303,3 +303,215 @@ async def admin_process_withdrawal(
 
     await db.flush()
     return {"status": withdrawal.status, "id": str(withdrawal.id)}
+
+
+# ── Time Logs (all sessions, filterable) ─────────────────────────────────────
+
+@router.get("/time-logs")
+async def admin_time_logs(
+    task_id: uuid.UUID | None = Query(None),
+    worker_id: uuid.UUID | None = Query(None),
+    log_status: str | None = Query(None, alias="status"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """All task sessions (active + completed) with full cost details."""
+    q = select(TaskSession).order_by(TaskSession.checked_in_at.desc())
+    if task_id:
+        q = q.where(TaskSession.task_id == task_id)
+    if worker_id:
+        q = q.where(TaskSession.worker_id == worker_id)
+    if log_status:
+        q = q.where(TaskSession.status == log_status)
+    result = await db.execute(q)
+    sessions = result.scalars().all()
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for s in sessions:
+        worker_result = await db.execute(select(User).where(User.id == s.worker_id))
+        worker = worker_result.scalar_one_or_none()
+        task_result = await db.execute(select(Task).where(Task.id == s.task_id))
+        task = task_result.scalar_one_or_none()
+
+        if s.status == SessionStatus.ACTIVE:
+            elapsed = round((now - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60, 1)
+            cost = round(elapsed * (task.pay_rate_per_minute if task else 0), 2)
+        else:
+            if s.checked_in_at and s.checked_out_at:
+                elapsed = round(
+                    (s.checked_out_at.replace(tzinfo=timezone.utc) - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60, 1
+                )
+            else:
+                elapsed = None
+            cost = s.earnings
+
+        out.append({
+            "session_id": str(s.id),
+            "worker_id": str(s.worker_id),
+            "worker_name": worker.full_name if worker else "Unknown",
+            "worker_email": worker.email if worker else "",
+            "task_id": str(s.task_id),
+            "task_title": task.title if task else "Unknown",
+            "task_location": task.location if task else "",
+            "pay_rate_per_minute": task.pay_rate_per_minute if task else 0,
+            "checked_in_at": s.checked_in_at.isoformat() if s.checked_in_at else None,
+            "checked_out_at": s.checked_out_at.isoformat() if s.checked_out_at else None,
+            "elapsed_minutes": elapsed,
+            "cost": cost,
+            "status": s.status,
+            "rating": s.rating,
+        })
+    return out
+
+
+# ── Manual Time Adjustment ────────────────────────────────────────────────────
+
+class TimeAdjustment(BaseModel):
+    checked_in_at: datetime
+    checked_out_at: datetime | None = None
+    reason: str | None = None
+
+
+@router.patch("/sessions/{session_id}/adjust")
+async def admin_adjust_session_time(
+    session_id: uuid.UUID,
+    payload: TimeAdjustment,
+    admin_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually adjust check-in / check-out times. Recalculates earnings and updates wallet."""
+    result = await db.execute(select(TaskSession).where(TaskSession.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    task_result = await db.execute(select(Task).where(Task.id == session.task_id))
+    task = task_result.scalar_one()
+
+    old_earnings = session.earnings or 0.0
+
+    # Apply new times
+    session.checked_in_at = payload.checked_in_at.replace(tzinfo=timezone.utc) if payload.checked_in_at.tzinfo is None else payload.checked_in_at
+
+    if payload.checked_out_at:
+        co = payload.checked_out_at.replace(tzinfo=timezone.utc) if payload.checked_out_at.tzinfo is None else payload.checked_out_at
+        session.checked_out_at = co
+        elapsed = (co - session.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60
+        new_earnings = round(elapsed * task.pay_rate_per_minute, 2)
+        session.earnings = new_earnings
+        session.status = SessionStatus.COMPLETED
+
+        # Adjust wallet balance by the diff
+        diff = new_earnings - old_earnings
+        wallet_result = await db.execute(select(Wallet).where(Wallet.user_id == session.worker_id))
+        wallet = wallet_result.scalar_one_or_none()
+        if wallet and diff != 0:
+            wallet.available_balance = round(wallet.available_balance + diff, 2)
+            # Record adjustment transaction
+            reason_note = f" Reason: {payload.reason}" if payload.reason else ""
+            db.add(Transaction(
+                user_id=session.worker_id,
+                type=TransactionType.CREDIT if diff > 0 else TransactionType.WITHDRAWAL_PENDING,
+                amount=abs(diff),
+                description=f"Time adjustment by admin (session {str(session_id)[:8]}…){reason_note}",
+                reference_id=str(session_id),
+            ))
+        # Notify worker
+        reason_note = f" Reason: {payload.reason}" if payload.reason else ""
+        db.add(Message(
+            sender_id=admin_user.id,
+            recipient_id=session.worker_id,
+            body=f"⏱ Your work session time was adjusted by an admin. New earnings: RM {new_earnings:.2f}.{reason_note}",
+        ))
+    else:
+        # Only check-in adjustment (active session)
+        new_earnings = None
+
+    await db.flush()
+    return {
+        "session_id": str(session.id),
+        "checked_in_at": session.checked_in_at.isoformat(),
+        "checked_out_at": session.checked_out_at.isoformat() if session.checked_out_at else None,
+        "old_earnings": old_earnings,
+        "new_earnings": session.earnings,
+        "status": session.status,
+    }
+
+
+# ── Task Cost Summary ─────────────────────────────────────────────────────────
+
+@router.get("/tasks/{task_id}/cost")
+async def admin_task_cost(
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Breakdown of total cost for a task across all sessions."""
+    task_result = await db.execute(select(Task).where(Task.id == task_id))
+    task = task_result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    sessions_result = await db.execute(select(TaskSession).where(TaskSession.task_id == task_id))
+    sessions = sessions_result.scalars().all()
+
+    now = datetime.now(timezone.utc)
+    completed = [s for s in sessions if s.status == SessionStatus.COMPLETED]
+    active = [s for s in sessions if s.status == SessionStatus.ACTIVE]
+
+    paid_cost = sum(s.earnings or 0 for s in completed)
+    live_cost = sum(
+        round((now - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60 * task.pay_rate_per_minute, 2)
+        for s in active
+    )
+    estimated_total = task.pay_rate_per_minute * task.estimated_duration_minutes
+
+    return {
+        "task_id": str(task_id),
+        "task_title": task.title,
+        "pay_rate_per_minute": task.pay_rate_per_minute,
+        "estimated_duration_minutes": task.estimated_duration_minutes,
+        "estimated_total_cost": round(estimated_total, 2),
+        "paid_cost": round(paid_cost, 2),
+        "live_accruing_cost": round(live_cost, 2),
+        "total_projected_cost": round(paid_cost + live_cost, 2),
+        "completed_sessions": len(completed),
+        "active_sessions": len(active),
+    }
+
+
+@router.get("/tasks/costs")
+async def admin_all_task_costs(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Cost summary for every task (for budget overview table)."""
+    tasks_result = await db.execute(select(Task).order_by(Task.created_at.desc()))
+    tasks = tasks_result.scalars().all()
+
+    sessions_result = await db.execute(select(TaskSession))
+    all_sessions = sessions_result.scalars().all()
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for t in tasks:
+        t_sessions = [s for s in all_sessions if s.task_id == t.id]
+        paid = sum(s.earnings or 0 for s in t_sessions if s.status == SessionStatus.COMPLETED)
+        live = sum(
+            (now - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60 * t.pay_rate_per_minute
+            for s in t_sessions if s.status == SessionStatus.ACTIVE
+        )
+        estimated = t.pay_rate_per_minute * t.estimated_duration_minutes
+        out.append({
+            "task_id": str(t.id),
+            "task_title": t.title,
+            "status": t.status,
+            "pay_rate_per_minute": t.pay_rate_per_minute,
+            "estimated_cost": round(estimated, 2),
+            "paid_cost": round(paid, 2),
+            "live_cost": round(live, 2),
+            "total_cost": round(paid + live, 2),
+            "session_count": len(t_sessions),
+        })
+    return out

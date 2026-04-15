@@ -12,6 +12,7 @@ import Tasks from './pages/Tasks'
 import Applications from './pages/Applications'
 import ActiveWorkers from './pages/ActiveWorkers'
 import Withdrawals from './pages/Withdrawals'
+import TimeLogs from './pages/TimeLogs'
 
 function AdminRoute({ children }) {
   const { token, user } = useSelector((s) => s.auth)
@@ -43,6 +44,7 @@ export default function App() {
                   <Route path="/tasks" element={<Tasks />} />
                   <Route path="/applications" element={<Applications />} />
                   <Route path="/active-workers" element={<ActiveWorkers />} />
+                  <Route path="/time-logs" element={<TimeLogs />} />
                   <Route path="/withdrawals" element={<Withdrawals />} />
                 </Routes>
               </main>
