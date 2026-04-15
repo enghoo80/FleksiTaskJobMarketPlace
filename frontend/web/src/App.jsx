@@ -13,6 +13,7 @@ import TaskDetail from './pages/TaskDetail'
 import MyApplications from './pages/MyApplications'
 import TaskTracking from './pages/TaskTracking'
 import Wallet from './pages/Wallet'
+import History from './pages/History'
 
 function PrivateRoute({ children }) {
   const token = useSelector((s) => s.auth.accessToken)
@@ -41,6 +42,7 @@ export default function App() {
             <Route path="/my-applications" element={<PrivateRoute><MyApplications /></PrivateRoute>} />
             <Route path="/track/:applicationId" element={<PrivateRoute><TaskTracking /></PrivateRoute>} />
             <Route path="/wallet" element={<PrivateRoute><Wallet /></PrivateRoute>} />
+            <Route path="/history" element={<PrivateRoute><History /></PrivateRoute>} />
           </Routes>
         </main>
       </div>

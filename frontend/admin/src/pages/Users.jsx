@@ -66,6 +66,36 @@ function MessageModal({ worker, onClose }) {
 }
 
 /* ─── Worker profile drawer ──────────────────────────────────────────────── */
+function StarRater({ sessionId, currentRating, onRated }) {
+  const [hover, setHover] = useState(0)
+  const [saving, setSaving] = useState(false)
+
+  const rate = async (value) => {
+    setSaving(true)
+    try {
+      await api.post(`/task-sessions/${sessionId}/rate`, null, { params: { rating: value } })
+      onRated(sessionId, value)
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <div className="flex items-center gap-0.5">
+      {[1, 2, 3, 4, 5].map(i => (
+        <button key={i} disabled={saving}
+          onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(0)}
+          onClick={() => rate(i)}
+          className={`text-lg transition-colors ${
+            i <= (hover || currentRating || 0) ? 'text-amber-400' : 'text-gray-300'
+          } hover:scale-110 disabled:opacity-50`}>
+          ★
+        </button>
+      ))}
+      {currentRating && <span className="text-xs text-gray-400 ml-1">{currentRating.toFixed(1)}</span>}
+    </div>
+  )
+}
+
 function WorkerDrawer({ user, onClose, onMessage }) {
   const [profile, setProfile] = useState(null)
   const [sessions, setSessions] = useState([])
@@ -80,6 +110,10 @@ function WorkerDrawer({ user, onClose, onMessage }) {
       setSessions(s.data)
     }).catch(() => {}).finally(() => setLoading(false))
   }, [user.id])
+
+  const handleRated = (sessionId, value) => {
+    setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, rating: value } : s))
+  }
 
   const stats = profile?.stats
 
@@ -151,6 +185,15 @@ function WorkerDrawer({ user, onClose, onMessage }) {
                         {s.earnings != null ? `RM ${s.earnings.toFixed(2)}` : '—'}
                       </span>
                     </div>
+                    {s.status === 'COMPLETED' && (
+                      <div className="mt-1.5">
+                        <StarRater
+                          sessionId={s.id}
+                          currentRating={s.rating}
+                          onRated={handleRated}
+                        />
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

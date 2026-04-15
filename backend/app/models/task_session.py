@@ -25,6 +25,8 @@ class TaskSession(Base):
     status: Mapped[SessionStatus] = mapped_column(SAEnum(SessionStatus, name="sessionstatus"), default=SessionStatus.ACTIVE, nullable=False)
     proof_photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     proof_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rating: Mapped[float | None] = mapped_column(Float, nullable=True)        # 1.0 – 5.0
+    feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     task = relationship("Task", foreign_keys=[task_id])

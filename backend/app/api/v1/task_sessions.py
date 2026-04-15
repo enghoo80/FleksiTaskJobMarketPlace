@@ -207,3 +207,147 @@ async def get_active_session(
     if not session:
         return None
     return TaskSessionResponse.model_validate(session)
+
+
+# ── History & Performance ─────────────────────────────────────────────────────
+
+@router.get("/history")
+async def get_history(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Completed sessions with full task details for the worker's history page."""
+    result = await db.execute(
+        select(TaskSession)
+        .where(
+            TaskSession.worker_id == current_user.id,
+            TaskSession.status == SessionStatus.COMPLETED,
+        )
+        .order_by(TaskSession.checked_out_at.desc())
+    )
+    sessions = result.scalars().all()
+    out = []
+    for s in sessions:
+        task_result = await db.execute(select(Task).where(Task.id == s.task_id))
+        task = task_result.scalar_one_or_none()
+        elapsed = None
+        if s.checked_in_at and s.checked_out_at:
+            elapsed = round(
+                (s.checked_out_at.replace(tzinfo=timezone.utc) - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60,
+                1,
+            )
+        out.append({
+            "session_id": str(s.id),
+            "task_id": str(s.task_id),
+            "task_title": task.title if task else "Unknown",
+            "task_location": task.location if task else "",
+            "task_category": task.category if task else "",
+            "task_photo_url": task.photo_url if task else None,
+            "checked_in_at": s.checked_in_at.isoformat() if s.checked_in_at else None,
+            "checked_out_at": s.checked_out_at.isoformat() if s.checked_out_at else None,
+            "elapsed_minutes": elapsed,
+            "earnings": s.earnings,
+            "rating": s.rating,
+            "feedback": s.feedback,
+            "proof_notes": s.proof_notes,
+            "proof_photo_url": s.proof_photo_url,
+        })
+    return out
+
+
+@router.get("/stats")
+async def get_performance_stats(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Monthly performance stats: hours, earnings, average rating, counts."""
+    from calendar import monthrange
+    from datetime import date
+
+    today = date.today()
+    month_start = datetime(today.year, today.month, 1, tzinfo=timezone.utc)
+    last_day = monthrange(today.year, today.month)[1]
+    month_end = datetime(today.year, today.month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+
+    # All completed sessions
+    all_result = await db.execute(
+        select(TaskSession).where(
+            TaskSession.worker_id == current_user.id,
+            TaskSession.status == SessionStatus.COMPLETED,
+        )
+    )
+    all_sessions = all_result.scalars().all()
+
+    # This month's completed sessions
+    month_sessions = [
+        s for s in all_sessions
+        if s.checked_out_at and month_start <= s.checked_out_at.replace(tzinfo=timezone.utc) <= month_end
+    ]
+
+    # Monthly totals
+    month_minutes = sum(
+        (s.checked_out_at.replace(tzinfo=timezone.utc) - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60
+        for s in month_sessions
+        if s.checked_in_at and s.checked_out_at
+    )
+    month_earnings = sum(s.earnings or 0 for s in month_sessions)
+
+    # All-time totals
+    total_minutes = sum(
+        (s.checked_out_at.replace(tzinfo=timezone.utc) - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60
+        for s in all_sessions
+        if s.checked_in_at and s.checked_out_at
+    )
+    total_earnings = sum(s.earnings or 0 for s in all_sessions)
+
+    # Ratings
+    rated = [s for s in all_sessions if s.rating is not None]
+    avg_rating = round(sum(s.rating for s in rated) / len(rated), 2) if rated else None
+
+    return {
+        "this_month": {
+            "sessions": len(month_sessions),
+            "hours": round(month_minutes / 60, 1),
+            "minutes": round(month_minutes, 0),
+            "earnings": round(month_earnings, 2),
+        },
+        "all_time": {
+            "sessions": len(all_sessions),
+            "hours": round(total_minutes / 60, 1),
+            "earnings": round(total_earnings, 2),
+        },
+        "rating": {
+            "average": avg_rating,
+            "count": len(rated),
+        },
+    }
+
+
+@router.post("/{session_id}/rate")
+async def rate_session(
+    session_id: uuid.UUID,
+    rating: float,
+    feedback: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Rate a completed session (admin only)."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
+    if not (1.0 <= rating <= 5.0):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Rating must be 1.0–5.0")
+
+    result = await db.execute(
+        select(TaskSession).where(
+            TaskSession.id == session_id,
+            TaskSession.status == SessionStatus.COMPLETED,
+        )
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Completed session not found")
+
+    session.rating = round(rating, 1)
+    session.feedback = feedback
+    await db.flush()
+    return {"session_id": str(session.id), "rating": session.rating, "feedback": session.feedback}

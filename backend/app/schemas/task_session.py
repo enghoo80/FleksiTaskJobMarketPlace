@@ -23,6 +23,8 @@ class TaskSessionResponse(BaseModel):
     status: SessionStatus
     proof_photo_url: str | None = None
     proof_notes: str | None = None
+    rating: float | None = None
+    feedback: str | None = None
 
     model_config = {"from_attributes": True}
 

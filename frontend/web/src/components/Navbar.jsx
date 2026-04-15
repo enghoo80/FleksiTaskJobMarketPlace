@@ -25,6 +25,9 @@ export default function Navbar() {
               <Link to="/wallet" className="text-sm text-gray-600 hover:text-primary-600 font-medium">
                 💰 Wallet
               </Link>
+              <Link to="/history" className="text-sm text-gray-600 hover:text-primary-600 font-medium">
+                📊 History
+              </Link>
               <Link to="/my-applications" className="text-sm text-gray-600 hover:text-primary-600 font-medium">
                 My Applications
               </Link>
