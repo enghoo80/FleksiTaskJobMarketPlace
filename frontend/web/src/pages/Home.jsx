@@ -1,16 +1,26 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useDispatch, useSelector } from 'react-redux'
 import { fetchTasks } from '../store/taskSlice'
 import TaskCard from '../components/TaskCard'
 import FilterBar from '../components/FilterBar'
+import { walletApi } from '../api/wallet'
 
 export default function Home() {
   const dispatch = useDispatch()
   const { items, loading, error, total, page, totalPages, filters } = useSelector((s) => s.tasks)
+  const { accessToken } = useSelector((s) => s.auth)
+  const [wallet, setWallet] = useState(null)
 
   useEffect(() => {
     dispatch(fetchTasks({}))
   }, [dispatch])
+
+  useEffect(() => {
+    if (accessToken) {
+      walletApi.getWallet().then(r => setWallet(r.data)).catch(() => {})
+    }
+  }, [accessToken])
 
   const handlePage = (newPage) => {
     dispatch(fetchTasks({ ...filters, page: newPage }))
@@ -19,6 +29,25 @@ export default function Home() {
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-8">
+      {/* Wallet Banner (logged-in users only) */}
+      {accessToken && wallet && (
+        <Link to="/wallet" className="block bg-gradient-to-r from-primary-600 to-primary-700 rounded-2xl p-4 mb-6 text-white hover:from-primary-700 hover:to-primary-800 transition-colors shadow-md">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-medium text-primary-200">My Wallet</p>
+              <p className="text-2xl font-bold">RM {wallet.available_balance.toFixed(2)}</p>
+              {wallet.pending_balance > 0 && (
+                <p className="text-xs text-primary-200 mt-0.5">⏳ RM {wallet.pending_balance.toFixed(2)} pending</p>
+              )}
+            </div>
+            <div className="text-right">
+              <p className="text-3xl">💰</p>
+              <p className="text-xs text-primary-200 mt-1">View Wallet →</p>
+            </div>
+          </div>
+        </Link>
+      )}
+
       {/* Hero */}
       <div className="text-center mb-8">
         <h1 className="text-3xl sm:text-4xl font-bold text-gray-900">

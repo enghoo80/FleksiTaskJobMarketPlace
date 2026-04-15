@@ -8,6 +8,7 @@ const links = [
   { to: '/tasks', label: 'Tasks', icon: '📋' },
   { to: '/applications', label: 'Applications', icon: '📝' },
   { to: '/active-workers', label: 'Active Workers', icon: '🟢' },
+  { to: '/withdrawals', label: 'Withdrawals', icon: '💸' },
 ]
 
 export default function Sidebar() {

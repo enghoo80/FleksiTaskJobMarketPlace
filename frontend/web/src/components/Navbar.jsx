@@ -22,6 +22,9 @@ export default function Navbar() {
         <div className="flex items-center gap-3">
           {accessToken ? (
             <>
+              <Link to="/wallet" className="text-sm text-gray-600 hover:text-primary-600 font-medium">
+                💰 Wallet
+              </Link>
               <Link to="/my-applications" className="text-sm text-gray-600 hover:text-primary-600 font-medium">
                 My Applications
               </Link>

@@ -13,6 +13,7 @@ from app.models.task import Task
 from app.schemas.task_session import CheckInRequest, TaskSessionResponse, EarningsResponse
 from app.core.deps import get_current_user
 from app.models.user import User
+from app.models.wallet import Wallet, Transaction, TransactionType
 from app.config import get_settings
 
 router = APIRouter(prefix="/task-sessions", tags=["Task Tracking"])
@@ -117,6 +118,24 @@ async def check_out(
     session.proof_notes = proof_notes
     if photo_url:
         session.proof_photo_url = photo_url
+
+    # ── Credit earnings to wallet ─────────────────────────────────────────────
+    wallet_result = await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))
+    wallet = wallet_result.scalar_one_or_none()
+    if not wallet:
+        wallet = Wallet(user_id=current_user.id)
+        db.add(wallet)
+        await db.flush()
+    wallet.available_balance = round(wallet.available_balance + earnings, 2)
+    txn = Transaction(
+        user_id=current_user.id,
+        type=TransactionType.CREDIT,
+        amount=earnings,
+        description=f"Earnings from task: {task.title}",
+        reference_id=str(session.id),
+    )
+    db.add(txn)
+    # ──────────────────────────────────────────────────────────────────────────
 
     await db.flush()
     return TaskSessionResponse.model_validate(session)

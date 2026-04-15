@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.database import get_db
 from app.models.application import Application, ApplicationStatus
@@ -188,3 +188,118 @@ async def admin_active_workers(
             "current_earnings": current_earnings,
         })
     return out
+
+
+# ── Withdrawal Management ─────────────────────────────────────────────────────
+
+from app.models.wallet import Wallet, WithdrawalRequest, WithdrawalStatus, Transaction, TransactionType
+from app.schemas.wallet import WithdrawalResponse
+from app.models.message import Message
+
+
+class WithdrawalAction(BaseModel):
+    action: str   # "approve" or "reject"
+    notes: str | None = None
+
+
+@router.get("/withdrawals", response_model=list[dict])
+async def admin_list_withdrawals(
+    req_status: str | None = Query(None, alias="status"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """List all withdrawal requests with worker info."""
+    q = select(WithdrawalRequest).order_by(WithdrawalRequest.created_at.desc())
+    if req_status:
+        q = q.where(WithdrawalRequest.status == req_status)
+    result = await db.execute(q)
+    withdrawals = result.scalars().all()
+    out = []
+    for w in withdrawals:
+        worker_result = await db.execute(select(User).where(User.id == w.user_id))
+        worker = worker_result.scalar_one_or_none()
+        out.append({
+            "id": str(w.id),
+            "user_id": str(w.user_id),
+            "worker_name": worker.full_name if worker else "Unknown",
+            "worker_email": worker.email if worker else "",
+            "amount": w.amount,
+            "status": w.status,
+            "bank_name": w.bank_name,
+            "account_number": "*" * (len(w.account_number) - 4) + w.account_number[-4:],
+            "account_holder_name": w.account_holder_name,
+            "admin_notes": w.admin_notes,
+            "processed_at": w.processed_at.isoformat() if w.processed_at else None,
+            "created_at": w.created_at.isoformat(),
+        })
+    return out
+
+
+@router.patch("/withdrawals/{withdrawal_id}")
+async def admin_process_withdrawal(
+    withdrawal_id: uuid.UUID,
+    payload: WithdrawalAction,
+    admin_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve or reject a withdrawal request."""
+    result = await db.execute(select(WithdrawalRequest).where(WithdrawalRequest.id == withdrawal_id))
+    withdrawal = result.scalar_one_or_none()
+    if not withdrawal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Withdrawal not found")
+    if withdrawal.status != WithdrawalStatus.PENDING:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Withdrawal already processed")
+
+    now = datetime.now(timezone.utc)
+    action = payload.action.lower()
+
+    if action == "approve":
+        withdrawal.status = WithdrawalStatus.APPROVED
+        withdrawal.processed_at = now
+        withdrawal.admin_notes = payload.notes
+        txn = Transaction(
+            user_id=withdrawal.user_id,
+            type=TransactionType.WITHDRAWAL_COMPLETED,
+            amount=-withdrawal.amount,
+            description=f"Withdrawal approved to {withdrawal.bank_name} ···{withdrawal.account_number[-4:]}",
+            reference_id=str(withdrawal.id),
+        )
+        db.add(txn)
+        # Notify worker via message
+        notif = Message(
+            sender_id=admin_user.id,
+            recipient_id=withdrawal.user_id,
+            body=f"✅ Your withdrawal of RM {withdrawal.amount:.2f} has been approved and transferred to {withdrawal.bank_name} ···{withdrawal.account_number[-4:]}. Please allow 1-3 business days.",
+        )
+        db.add(notif)
+
+    elif action == "reject":
+        withdrawal.status = WithdrawalStatus.REJECTED
+        withdrawal.processed_at = now
+        withdrawal.admin_notes = payload.notes
+        # Refund the amount back to wallet
+        wallet_result = await db.execute(select(Wallet).where(Wallet.user_id == withdrawal.user_id))
+        wallet = wallet_result.scalar_one_or_none()
+        if wallet:
+            wallet.available_balance = round(wallet.available_balance + withdrawal.amount, 2)
+        txn = Transaction(
+            user_id=withdrawal.user_id,
+            type=TransactionType.WITHDRAWAL_REJECTED,
+            amount=withdrawal.amount,
+            description=f"Withdrawal rejected — RM {withdrawal.amount:.2f} refunded to wallet",
+            reference_id=str(withdrawal.id),
+        )
+        db.add(txn)
+        # Notify worker via message
+        reason = f" Reason: {payload.notes}" if payload.notes else ""
+        notif = Message(
+            sender_id=admin_user.id,
+            recipient_id=withdrawal.user_id,
+            body=f"❌ Your withdrawal of RM {withdrawal.amount:.2f} was rejected and has been refunded to your wallet.{reason}",
+        )
+        db.add(notif)
+    else:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="action must be 'approve' or 'reject'")
+
+    await db.flush()
+    return {"status": withdrawal.status, "id": str(withdrawal.id)}
