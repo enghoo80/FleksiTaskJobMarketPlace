@@ -1,31 +1,53 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import StatsCard from '../components/StatsCard'
 import api from '../api/client'
 
 export default function Dashboard() {
-  const [stats, setStats] = useState({ tasks: 0 })
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    api.get('/tasks?page_size=1').then((r) => {
-      setStats({ tasks: r.data.total })
-    }).catch(() => {})
+    api.get('/admin/analytics/dashboard')
+      .then((r) => setData(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false))
   }, [])
+
+  const t = data?.tasks
+  const r = data?.revenue
+  const s = data?.sessions
 
   return (
     <div className="p-6">
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Dashboard</h1>
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <StatsCard label="Total Tasks" value={stats.tasks} icon="📋" color="green" />
-        <StatsCard label="Total Users" value="—" icon="👥" color="blue" />
-        <StatsCard label="Applications" value="—" icon="📝" color="yellow" />
-        <StatsCard label="Open Tasks" value="—" icon="🟢" color="purple" />
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+        <Link
+          to="/analytics"
+          className="text-sm text-blue-600 hover:underline flex items-center gap-1"
+        >
+          📈 Full Analytics →
+        </Link>
       </div>
 
-      <div className="bg-white rounded-xl p-8 shadow-sm border border-gray-100 text-center text-gray-400">
-        <p className="text-4xl mb-3">📊</p>
-        <p className="font-medium">Analytics charts coming in v2</p>
-      </div>
+      {loading ? (
+        <p className="text-gray-400">Loading metrics…</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <StatsCard label="Total Tasks" value={t?.total ?? '—'} icon="📋" color="green" />
+            <StatsCard label="Total Users" value={data?.users?.total ?? '—'} icon="👥" color="blue" />
+            <StatsCard label="Applications" value={data?.applications?.total ?? '—'} icon="📝" color="yellow" />
+            <StatsCard label="Active Workers" value={s?.active_now ?? '—'} icon="🟢" color="purple" />
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatsCard label="Total Paid Out" value={r ? `RM ${r.total_paid.toLocaleString()}` : '—'} icon="💰" color="green" />
+            <StatsCard label="Today's Spending" value={r ? `RM ${r.today}` : '—'} icon="📅" color="blue" />
+            <StatsCard label="Completion Rate" value={t ? `${t.completion_rate}%` : '—'} icon="✅" color="purple" />
+            <StatsCard label="Pending Withdrawals" value={data?.withdrawals?.pending ?? '—'} icon="💸" color="yellow" />
+          </div>
+        </>
+      )}
     </div>
   )
 }

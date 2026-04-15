@@ -515,3 +515,237 @@ async def admin_all_task_costs(
             "session_count": len(t_sessions),
         })
     return out
+
+
+# ── Reporting & Analytics ─────────────────────────────────────────────────────
+
+import io
+import csv
+from calendar import monthrange
+from fastapi.responses import StreamingResponse
+
+
+@router.get("/analytics/dashboard")
+async def analytics_dashboard(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Key metrics for the admin dashboard overview."""
+    from app.models.wallet import WithdrawalRequest, WithdrawalStatus
+
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Counts
+    total_users = (await db.execute(select(func.count()).select_from(User))).scalar_one()
+    total_tasks = (await db.execute(select(func.count()).select_from(Task))).scalar_one()
+    total_apps = (await db.execute(select(func.count()).select_from(Application))).scalar_one()
+    active_workers = (await db.execute(
+        select(func.count()).select_from(TaskSession).where(TaskSession.status == SessionStatus.ACTIVE)
+    )).scalar_one()
+
+    # Tasks by status
+    tasks_result = await db.execute(select(Task))
+    all_tasks = tasks_result.scalars().all()
+    open_tasks = sum(1 for t in all_tasks if t.status == "open")
+    completed_tasks = sum(1 for t in all_tasks if t.status == "completed")
+    cancelled_tasks = sum(1 for t in all_tasks if t.status == "cancelled")
+
+    # Sessions
+    sessions_result = await db.execute(select(TaskSession))
+    all_sessions = sessions_result.scalars().all()
+    completed_sessions = [s for s in all_sessions if s.status == SessionStatus.COMPLETED]
+
+    # Revenue (total paid out)
+    total_revenue = sum(s.earnings or 0 for s in completed_sessions)
+
+    # Active accruing cost
+    live_cost = sum(
+        (now - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60 *
+        next((t.pay_rate_per_minute for t in all_tasks if t.id == s.task_id), 0)
+        for s in all_sessions if s.status == SessionStatus.ACTIVE
+    )
+
+    # Today's sessions
+    today_sessions = [
+        s for s in completed_sessions
+        if s.checked_out_at and s.checked_out_at.replace(tzinfo=timezone.utc) >= today_start
+    ]
+    today_revenue = sum(s.earnings or 0 for s in today_sessions)
+
+    # Pending withdrawals
+    pend_wd = (await db.execute(
+        select(func.count()).select_from(WithdrawalRequest).where(WithdrawalRequest.status == "PENDING")
+    )).scalar_one()
+
+    # Applications by status
+    apps_result = await db.execute(select(Application))
+    all_apps = apps_result.scalars().all()
+
+    # Task completion rate
+    completion_rate = round(completed_tasks / total_tasks * 100, 1) if total_tasks else 0
+
+    # Average rating
+    rated = [s for s in completed_sessions if s.rating is not None]
+    avg_rating = round(sum(s.rating for s in rated) / len(rated), 2) if rated else None
+
+    return {
+        "users": {"total": total_users},
+        "tasks": {
+            "total": total_tasks,
+            "open": open_tasks,
+            "completed": completed_tasks,
+            "cancelled": cancelled_tasks,
+            "completion_rate": completion_rate,
+        },
+        "applications": {
+            "total": total_apps,
+            "pending": sum(1 for a in all_apps if a.status == "pending"),
+            "approved": sum(1 for a in all_apps if a.status == "approved"),
+        },
+        "sessions": {
+            "total": len(all_sessions),
+            "completed": len(completed_sessions),
+            "active_now": active_workers,
+        },
+        "revenue": {
+            "total_paid": round(total_revenue, 2),
+            "live_accruing": round(live_cost, 2),
+            "today": round(today_revenue, 2),
+        },
+        "withdrawals": {"pending": pend_wd},
+        "rating": {"average": avg_rating, "count": len(rated)},
+    }
+
+
+@router.get("/analytics/monthly")
+async def analytics_monthly(
+    year: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Monthly spending/earnings breakdown for the last 12 months (or given year)."""
+    now = datetime.now(timezone.utc)
+    target_year = year or now.year
+
+    sessions_result = await db.execute(
+        select(TaskSession).where(TaskSession.status == SessionStatus.COMPLETED)
+    )
+    sessions = sessions_result.scalars().all()
+
+    monthly = []
+    for month in range(1, 13):
+        last_day = monthrange(target_year, month)[1]
+        m_start = datetime(target_year, month, 1, tzinfo=timezone.utc)
+        m_end = datetime(target_year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+        m_sessions = [
+            s for s in sessions
+            if s.checked_out_at and m_start <= s.checked_out_at.replace(tzinfo=timezone.utc) <= m_end
+        ]
+        spending = sum(s.earnings or 0 for s in m_sessions)
+        hours = sum(
+            (s.checked_out_at.replace(tzinfo=timezone.utc) - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 3600
+            for s in m_sessions if s.checked_in_at and s.checked_out_at
+        )
+        monthly.append({
+            "month": month,
+            "month_name": m_start.strftime("%b"),
+            "year": target_year,
+            "sessions": len(m_sessions),
+            "spending": round(spending, 2),
+            "hours": round(hours, 1),
+        })
+    return {"year": target_year, "months": monthly}
+
+
+@router.get("/analytics/task-completion")
+async def analytics_task_completion(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Task completion rates by category."""
+    tasks_result = await db.execute(select(Task))
+    all_tasks = tasks_result.scalars().all()
+
+    # By category
+    categories: dict[str, dict] = {}
+    for t in all_tasks:
+        cat = t.category or "Other"
+        if cat not in categories:
+            categories[cat] = {"total": 0, "completed": 0, "cancelled": 0, "open": 0}
+        categories[cat]["total"] += 1
+        if t.status == "completed":
+            categories[cat]["completed"] += 1
+        elif t.status == "cancelled":
+            categories[cat]["cancelled"] += 1
+        else:
+            categories[cat]["open"] += 1
+
+    result = []
+    for cat, counts in sorted(categories.items()):
+        rate = round(counts["completed"] / counts["total"] * 100, 1) if counts["total"] else 0
+        result.append({
+            "category": cat,
+            "total": counts["total"],
+            "completed": counts["completed"],
+            "cancelled": counts["cancelled"],
+            "open": counts["open"],
+            "completion_rate": rate,
+        })
+
+    total = len(all_tasks)
+    completed = sum(1 for t in all_tasks if t.status == "completed")
+    return {
+        "overall_rate": round(completed / total * 100, 1) if total else 0,
+        "by_category": result,
+    }
+
+
+@router.get("/analytics/export/workers")
+async def export_workers_csv(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Export all worker data to CSV (Excel-compatible)."""
+    users_result = await db.execute(select(User).where(User.is_admin == False).order_by(User.created_at.desc()))
+    users = users_result.scalars().all()
+
+    sessions_result = await db.execute(select(TaskSession).where(TaskSession.status == SessionStatus.COMPLETED))
+    all_sessions = sessions_result.scalars().all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Full Name", "Email", "Location", "Joined",
+        "Total Sessions", "Total Hours", "Total Earnings (RM)",
+        "Average Rating", "Is Verified",
+    ])
+
+    for u in users:
+        u_sessions = [s for s in all_sessions if s.worker_id == u.id]
+        hours = sum(
+            (s.checked_out_at.replace(tzinfo=timezone.utc) - s.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 3600
+            for s in u_sessions if s.checked_in_at and s.checked_out_at
+        )
+        earnings = sum(s.earnings or 0 for s in u_sessions)
+        rated = [s for s in u_sessions if s.rating is not None]
+        avg_r = round(sum(s.rating for s in rated) / len(rated), 2) if rated else ""
+        writer.writerow([
+            u.full_name,
+            u.email,
+            u.location or "",
+            u.created_at.strftime("%Y-%m-%d"),
+            len(u_sessions),
+            round(hours, 1),
+            round(earnings, 2),
+            avg_r,
+            "Yes" if u.is_verified else "No",
+        ])
+
+    output.seek(0)
+    filename = f"workers_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )

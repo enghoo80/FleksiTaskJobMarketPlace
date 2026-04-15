@@ -13,6 +13,7 @@ import Applications from './pages/Applications'
 import ActiveWorkers from './pages/ActiveWorkers'
 import Withdrawals from './pages/Withdrawals'
 import TimeLogs from './pages/TimeLogs'
+import Analytics from './pages/Analytics'
 
 function AdminRoute({ children }) {
   const { token, user } = useSelector((s) => s.auth)
@@ -46,6 +47,7 @@ export default function App() {
                   <Route path="/active-workers" element={<ActiveWorkers />} />
                   <Route path="/time-logs" element={<TimeLogs />} />
                   <Route path="/withdrawals" element={<Withdrawals />} />
+                  <Route path="/analytics" element={<Analytics />} />
                 </Routes>
               </main>
             </div>
