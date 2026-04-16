@@ -7,8 +7,6 @@ services:
       POSTGRES_DB: fleksitask
       POSTGRES_USER: fleksi
       POSTGRES_PASSWORD: password
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,8 +19,6 @@ services:
     image: redis:7-alpine
     container_name: fleksitask-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
@@ -43,7 +39,6 @@ services:
     env_file:
       - ./backend/.env
     volumes:
-      - ./backend:/app
       - media_data:/app/media
     depends_on:
       postgres:
@@ -51,7 +46,7 @@ services:
       redis:
         condition: service_healthy
     command: >
-      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"
 
   frontend-web:
     build:
