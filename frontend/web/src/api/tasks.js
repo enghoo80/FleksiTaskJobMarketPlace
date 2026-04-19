@@ -1,4 +1,4 @@
-import api from './client'
+import api, { apiBaseUrl } from './client'
 
 export const tasksApi = {
   list: async ({ page = 1, pageSize = 20, location, category, minPay, maxPay } = {}) => {
@@ -45,12 +45,30 @@ export const taskSessionsApi = {
     return data
   },
   checkOut: async (sessionId, proofNotes, proofPhoto) => {
+    if (!proofPhoto) {
+      const { data } = await api.post(`/task-sessions/${sessionId}/checkout-simple`, {
+        proof_notes: proofNotes || null,
+      })
+      return data
+    }
+
     const form = new FormData()
     if (proofNotes) form.append('proof_notes', proofNotes)
     if (proofPhoto) form.append('proof_photo', proofPhoto)
-    const { data } = await api.post(`/task-sessions/${sessionId}/checkout`, form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+    const token = localStorage.getItem('access_token')
+    const response = await fetch(`${apiBaseUrl}/task-sessions/${sessionId}/checkout`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      body: form,
     })
+
+    const data = await response.json().catch(() => null)
+    if (!response.ok) {
+      const error = new Error(data?.detail || 'Check-out failed')
+      error.response = { data, status: response.status }
+      throw error
+    }
+
     return data
   },
   getEarnings: async (sessionId) => {

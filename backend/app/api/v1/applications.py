@@ -1,3 +1,4 @@
+import json
 import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,6 +14,20 @@ from app.core.deps import get_current_user
 from app.core.firebase import send_application_status_notification
 
 router = APIRouter(prefix="/applications", tags=["Applications"])
+
+
+def build_user_public(user: User):
+    skills = user.skills
+    if isinstance(skills, str):
+        skills = json.loads(skills)
+    from app.schemas.user import UserPublic
+    return UserPublic.model_validate({
+        "id": user.id,
+        "full_name": user.full_name,
+        "profile_photo_url": user.profile_photo_url,
+        "location": user.location,
+        "skills": skills,
+    })
 
 
 @router.post("", response_model=ApplicationResponse, status_code=status.HTTP_201_CREATED)
@@ -58,7 +73,8 @@ async def get_my_applications(
     for app in applications:
         task_result = await db.execute(select(Task).where(Task.id == app.task_id))
         task = task_result.scalar_one_or_none()
-        app_data = ApplicationWithDetails.model_validate(app)
+        app_base = ApplicationResponse.model_validate(app)
+        app_data = ApplicationWithDetails(**app_base.model_dump())
         if task:
             from app.schemas.task import TaskResponse
             from sqlalchemy import func
@@ -91,10 +107,10 @@ async def get_task_applications(
     for app in applications:
         worker_result = await db.execute(select(User).where(User.id == app.worker_id))
         worker = worker_result.scalar_one_or_none()
-        app_data = ApplicationWithDetails.model_validate(app)
+        app_base = ApplicationResponse.model_validate(app)
+        app_data = ApplicationWithDetails(**app_base.model_dump())
         if worker:
-            from app.schemas.user import UserPublic
-            app_data.worker = UserPublic.model_validate(worker)
+            app_data.worker = build_user_public(worker)
         response.append(app_data)
     return response
 
@@ -121,6 +137,7 @@ async def update_application_status(
     application.reviewed_at = datetime.now(timezone.utc)
     db.add(application)
     await db.flush()
+    await db.refresh(application)
 
     # Send push notification to the worker
     worker_result = await db.execute(select(User).where(User.id == application.worker_id))

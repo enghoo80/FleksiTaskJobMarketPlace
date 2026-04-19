@@ -1,6 +1,27 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit'
 import { authApi } from '../api/auth'
 
+function extractErrorMessage(err, fallbackMessage) {
+  const detail = err.response?.data?.detail
+  if (Array.isArray(detail)) {
+    return detail.map((entry) => entry.msg).join(', ')
+  }
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail
+  }
+
+  const contentType = err.response?.headers?.['content-type'] || ''
+  if (err.response?.status === 404 && contentType.includes('text/html')) {
+    return 'API route not reachable. Check that the backend is running and VITE_API_BASE_URL points to it.'
+  }
+
+  if (typeof err.response?.data === 'string' && err.response.data.includes('Not Found')) {
+    return 'API route not reachable. Check that the backend is running and VITE_API_BASE_URL points to it.'
+  }
+
+  return fallbackMessage
+}
+
 export const loginWithGoogle = createAsyncThunk('auth/loginWithGoogle', async (idToken, { rejectWithValue }) => {
   try {
     const data = await authApi.googleAuth(idToken)
@@ -8,7 +29,18 @@ export const loginWithGoogle = createAsyncThunk('auth/loginWithGoogle', async (i
     localStorage.setItem('refresh_token', data.refresh_token)
     return data
   } catch (err) {
-    return rejectWithValue(err.response?.data?.detail || 'Google login failed')
+    return rejectWithValue(extractErrorMessage(err, 'Google login failed'))
+  }
+})
+
+export const registerUser = createAsyncThunk('auth/register', async (payload, { rejectWithValue }) => {
+  try {
+    const data = await authApi.register(payload)
+    localStorage.setItem('access_token', data.access_token)
+    localStorage.setItem('refresh_token', data.refresh_token)
+    return data
+  } catch (err) {
+    return rejectWithValue(extractErrorMessage(err, 'Registration failed'))
   }
 })
 
@@ -19,7 +51,7 @@ export const loginWithEmail = createAsyncThunk('auth/loginWithEmail', async ({ e
     localStorage.setItem('refresh_token', data.refresh_token)
     return data
   } catch (err) {
-    return rejectWithValue(err.response?.data?.detail || 'Login failed')
+    return rejectWithValue(extractErrorMessage(err, 'Login failed'))
   }
 })
 
@@ -27,7 +59,7 @@ export const fetchCurrentUser = createAsyncThunk('auth/fetchCurrentUser', async 
   try {
     return await authApi.getMe()
   } catch (err) {
-    return rejectWithValue(err.response?.data?.detail || 'Failed to fetch user')
+    return rejectWithValue(extractErrorMessage(err, 'Failed to fetch user'))
   }
 })
 
@@ -63,6 +95,12 @@ const authSlice = createSlice({
         state.accessToken = action.payload.access_token
       })
       .addCase(loginWithEmail.rejected, (state, action) => { state.loading = false; state.error = action.payload })
+      .addCase(registerUser.pending, (state) => { state.loading = true; state.error = null })
+      .addCase(registerUser.fulfilled, (state, action) => {
+        state.loading = false
+        state.accessToken = action.payload.access_token
+      })
+      .addCase(registerUser.rejected, (state, action) => { state.loading = false; state.error = action.payload })
       .addCase(fetchCurrentUser.fulfilled, (state, action) => { state.user = action.payload })
       .addCase(fetchCurrentUser.rejected, (state) => { state.user = null; state.accessToken = null })
       .addCase(logoutUser.fulfilled, (state) => { state.user = null; state.accessToken = null })

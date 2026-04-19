@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from app.config import get_settings
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/google", response_model=TokenResponse, status_code=status.HTTP_200_OK)
@@ -24,9 +26,28 @@ async def google_auth(payload: GoogleAuthRequest, db: AsyncSession = Depends(get
         id_info = id_token.verify_oauth2_token(
             payload.id_token,
             google_requests.Request(),
-            settings.GOOGLE_CLIENT_ID,
+            None,
+            clock_skew_in_seconds=10,
         )
-    except ValueError:
+    except ValueError as exc:
+        logger.warning("Google token verification failed before audience check: %s", exc)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google token")
+
+    configured_client_id = settings.GOOGLE_CLIENT_ID.strip()
+    token_audience = id_info.get("aud")
+    allowed_audience = False
+    if isinstance(token_audience, str):
+        allowed_audience = token_audience == configured_client_id
+    elif isinstance(token_audience, list):
+        allowed_audience = configured_client_id in token_audience
+
+    if not allowed_audience:
+        logger.warning(
+            "Google token audience mismatch: expected=%s aud=%s azp=%s",
+            configured_client_id,
+            token_audience,
+            id_info.get("azp"),
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google token")
 
     google_id = id_info["sub"]

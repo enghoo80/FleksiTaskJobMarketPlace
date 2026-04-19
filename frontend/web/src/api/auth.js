@@ -5,6 +5,10 @@ export const authApi = {
     const { data } = await api.post('/auth/google', { id_token: idToken })
     return data
   },
+  register: async (payload) => {
+    const { data } = await api.post('/auth/register', payload)
+    return data
+  },
   login: async (email, password) => {
     const { data } = await api.post('/auth/login', { email, password })
     return data

@@ -16,6 +16,7 @@ export default function TaskTracking() {
 
   const [task, setTask] = useState(null)
   const [session, setSession] = useState(null)
+  const [otherActiveSession, setOtherActiveSession] = useState(null)
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState(false)
 
@@ -28,6 +29,14 @@ export default function TaskTracking() {
   const [proofPhoto, setProofPhoto] = useState(null)
   const [photoPreview, setPhotoPreview] = useState(null)
   const [showCheckout, setShowCheckout] = useState(false)
+
+  const minimumDurationSeconds = (task?.estimated_duration_minutes ?? 0) * 60
+  const completedDurationSeconds = session?.checked_out_at
+    ? Math.floor((new Date(session.checked_out_at) - new Date(session.checked_in_at)) / 1000)
+    : 0
+  const isResumableCompletion = Boolean(
+    session && session.status === 'completed' && minimumDurationSeconds > 0 && completedDurationSeconds < minimumDurationSeconds
+  )
 
   const startTimer = useCallback((checkedInAt) => {
     clearInterval(timerRef.current)
@@ -46,6 +55,11 @@ export default function TaskTracking() {
 
         const taskData = await tasksApi.getById(app.task_id)
         setTask(taskData)
+
+        const activeSession = await taskSessionsApi.getActiveSession()
+        if (activeSession && activeSession.application_id !== applicationId) {
+          setOtherActiveSession(activeSession)
+        }
 
         // Check for existing active session on this application
         const sessions = await taskSessionsApi.getMySessions()
@@ -70,12 +84,14 @@ export default function TaskTracking() {
 
   const handleCheckIn = async () => {
     setActionLoading(true)
+    const resuming = isResumableCompletion
     try {
       const newSession = await taskSessionsApi.checkIn(applicationId)
       setSession(newSession)
-      setElapsed(0)
+      const secs = Math.floor((Date.now() - new Date(newSession.checked_in_at).getTime()) / 1000)
+      setElapsed(secs)
       startTimer(newSession.checked_in_at)
-      toast.success('Checked in! Your time is now being tracked.')
+      toast.success(resuming ? 'Task tracking resumed.' : 'Checked in! Your time is now being tracked.')
     } catch (e) {
       toast.error(e.response?.data?.detail || 'Check-in failed')
     } finally {
@@ -89,8 +105,17 @@ export default function TaskTracking() {
       const completed = await taskSessionsApi.checkOut(session.id, proofNotes, proofPhoto)
       clearInterval(timerRef.current)
       setSession(completed)
+      setElapsed(0)
       setShowCheckout(false)
-      toast.success(`Checked out! You earned $${completed.earnings?.toFixed(2)}`)
+      const completedSeconds = completed.checked_out_at
+        ? Math.floor((new Date(completed.checked_out_at) - new Date(completed.checked_in_at)) / 1000)
+        : 0
+      const resumable = minimumDurationSeconds > 0 && completedSeconds < minimumDurationSeconds
+      if (resumable) {
+        toast.info('Checked out early. You can resume this task later to finish the minimum duration.')
+      } else {
+        toast.success(`Checked out! You earned $${completed.earnings?.toFixed(2)}`)
+      }
     } catch (e) {
       toast.error(e.response?.data?.detail || 'Check-out failed')
     } finally {
@@ -126,21 +151,41 @@ export default function TaskTracking() {
         <p className="text-sm text-primary-600 font-medium mt-1">
           ${payRate.toFixed(4)}/min &nbsp;·&nbsp; Est. {task?.estimated_duration_minutes} min
         </p>
+        <p className="text-xs text-gray-500 mt-2">
+          Minimum required: {formatDuration(minimumDurationSeconds)}
+        </p>
       </div>
 
       {/* Status Card */}
       {!session ? (
         <div className="card text-center space-y-4">
           <p className="text-4xl">🕐</p>
-          <p className="text-gray-600 font-medium">Ready to start work?</p>
-          <p className="text-sm text-gray-400">Check in to begin tracking your time and earnings.</p>
-          <button
-            onClick={handleCheckIn}
-            disabled={actionLoading}
-            className="w-full py-3 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-xl transition-colors disabled:opacity-50"
-          >
-            {actionLoading ? 'Checking in…' : '✅ Check In & Start Work'}
-          </button>
+          {otherActiveSession ? (
+            <>
+              <p className="text-gray-600 font-medium">Another task is already being tracked</p>
+              <p className="text-sm text-gray-400">
+                You can only track one task at a time. Return to your active task before starting this one.
+              </p>
+              <button
+                onClick={() => navigate(`/track/${otherActiveSession.application_id}`)}
+                className="w-full py-3 bg-amber-600 hover:bg-amber-700 text-white font-semibold rounded-xl transition-colors"
+              >
+                ↗ Go To Active Task
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-gray-600 font-medium">Ready to start work?</p>
+              <p className="text-sm text-gray-400">Check in to begin tracking your time and earnings.</p>
+              <button
+                onClick={handleCheckIn}
+                disabled={actionLoading}
+                className="w-full py-3 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-xl transition-colors disabled:opacity-50"
+              >
+                {actionLoading ? 'Checking in…' : '✅ Check In & Start Work'}
+              </button>
+            </>
+          )}
         </div>
       ) : session.status === 'active' ? (
         <div className="space-y-4">
@@ -149,6 +194,16 @@ export default function TaskTracking() {
             <p className="text-xs text-green-600 uppercase tracking-wide font-semibold">Live Earnings</p>
             <p className="text-4xl font-bold text-green-700">${currentEarnings.toFixed(2)}</p>
             <p className="text-sm text-green-600">⏱ {formatDuration(elapsed)} elapsed</p>
+            <div className="grid grid-cols-2 gap-3 text-left text-xs text-green-700 bg-white/70 rounded-xl p-3 border border-green-100">
+              <div>
+                <p className="uppercase tracking-wide text-green-500">Worked so far</p>
+                <p className="font-semibold text-sm">{formatDuration(elapsed)}</p>
+              </div>
+              <div>
+                <p className="uppercase tracking-wide text-green-500">Minimum required</p>
+                <p className="font-semibold text-sm">{formatDuration(minimumDurationSeconds)}</p>
+              </div>
+            </div>
             <div className="w-full bg-green-100 rounded-full h-2 mt-2">
               <div
                 className="bg-green-500 h-2 rounded-full transition-all duration-1000"
@@ -230,12 +285,31 @@ export default function TaskTracking() {
         /* Completed */
         <div className="card text-center space-y-4">
           <p className="text-5xl">🎉</p>
-          <h2 className="text-xl font-bold text-gray-900">Work Completed!</h2>
+          <h2 className="text-xl font-bold text-gray-900">{isResumableCompletion ? 'Session Paused' : 'Work Completed!'}</h2>
 
           <div className="bg-green-50 rounded-xl p-4 space-y-2">
-            <p className="text-sm text-gray-500">Total Earnings</p>
+            <p className="text-sm text-gray-500">{isResumableCompletion ? 'Current Progress' : 'Total Earnings'}</p>
             <p className="text-3xl font-bold text-green-700">${session.earnings?.toFixed(2)}</p>
           </div>
+
+          {isResumableCompletion && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-left space-y-1">
+              <p className="text-sm font-semibold text-amber-800">Minimum duration not reached yet</p>
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-amber-600">Worked so far</p>
+                  <p className="text-sm font-semibold text-amber-800">{formatDuration(completedDurationSeconds)}</p>
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-amber-600">Minimum required</p>
+                  <p className="text-sm font-semibold text-amber-800">{formatDuration(minimumDurationSeconds)}</p>
+                </div>
+              </div>
+              <p className="text-xs text-amber-700">
+                Resume this task to continue tracking from where you stopped.
+              </p>
+            </div>
+          )}
 
           <div className="text-left space-y-2 border-t border-gray-100 pt-3">
             <div className="flex justify-between text-sm">
@@ -268,12 +342,30 @@ export default function TaskTracking() {
             />
           )}
 
-          <button
-            onClick={() => navigate('/my-applications')}
-            className="w-full py-2.5 border border-gray-300 rounded-xl text-sm font-medium hover:bg-gray-50"
-          >
-            ← Back to My Applications
-          </button>
+          {isResumableCompletion ? (
+            <div className="space-y-3">
+              <button
+                onClick={handleCheckIn}
+                disabled={actionLoading}
+                className="w-full py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-xl text-sm font-semibold transition-colors disabled:opacity-50"
+              >
+                {actionLoading ? 'Resuming…' : '▶ Resume Task Tracking'}
+              </button>
+              <button
+                onClick={() => navigate('/my-applications')}
+                className="w-full py-2.5 border border-gray-300 rounded-xl text-sm font-medium hover:bg-gray-50"
+              >
+                ← Back to My Applications
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => navigate('/my-applications')}
+              className="w-full py-2.5 border border-gray-300 rounded-xl text-sm font-medium hover:bg-gray-50"
+            >
+              ← Back to My Applications
+            </button>
+          )}
         </div>
       )}
     </div>

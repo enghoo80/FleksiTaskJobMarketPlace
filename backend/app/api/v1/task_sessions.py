@@ -1,7 +1,7 @@
 import uuid
 import os
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -10,7 +10,7 @@ from app.database import get_db
 from app.models.task_session import TaskSession, SessionStatus
 from app.models.application import Application, ApplicationStatus
 from app.models.task import Task
-from app.schemas.task_session import CheckInRequest, TaskSessionResponse, EarningsResponse
+from app.schemas.task_session import CheckInRequest, CheckOutRequest, TaskSessionResponse, EarningsResponse
 from app.core.deps import get_current_user
 from app.models.user import User
 from app.models.wallet import Wallet, Transaction, TransactionType
@@ -18,6 +18,57 @@ from app.config import get_settings
 
 router = APIRouter(prefix="/task-sessions", tags=["Task Tracking"])
 settings = get_settings()
+
+
+def get_worked_minutes(session: TaskSession) -> float:
+    if not session.checked_in_at or not session.checked_out_at:
+        return 0.0
+    return max(
+        0.0,
+        (session.checked_out_at.replace(tzinfo=timezone.utc) - session.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60,
+    )
+
+
+async def finalize_checkout(
+    session: TaskSession,
+    task: Task,
+    current_user: User,
+    db: AsyncSession,
+    proof_notes: str | None,
+    photo_url: str | None = None,
+) -> TaskSessionResponse:
+    now = datetime.now(timezone.utc)
+    elapsed_minutes = (now - session.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60
+    earnings = round(elapsed_minutes * task.pay_rate_per_minute, 2)
+    minimum_duration_met = elapsed_minutes >= task.estimated_duration_minutes
+
+    session.checked_out_at = now
+    session.earnings = earnings
+    session.status = SessionStatus.COMPLETED
+    session.proof_notes = proof_notes
+    if photo_url:
+        session.proof_photo_url = photo_url
+
+    if minimum_duration_met:
+        wallet_result = await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))
+        wallet = wallet_result.scalar_one_or_none()
+        if not wallet:
+            wallet = Wallet(user_id=current_user.id)
+            db.add(wallet)
+            await db.flush()
+        wallet.available_balance = round(wallet.available_balance + earnings, 2)
+        txn = Transaction(
+            user_id=current_user.id,
+            type=TransactionType.CREDIT,
+            amount=earnings,
+            description=f"Earnings from task: {task.title}",
+            reference_id=str(session.id),
+        )
+        db.add(txn)
+
+    await db.flush()
+    await db.refresh(session)
+    return TaskSessionResponse.model_validate(session)
 
 
 @router.post("/checkin", response_model=TaskSessionResponse, status_code=status.HTTP_201_CREATED)
@@ -42,6 +93,24 @@ async def check_in(
             detail="Approved application not found for this worker",
         )
 
+    task_result = await db.execute(select(Task).where(Task.id == application.task_id))
+    task = task_result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    active_for_worker = await db.execute(
+        select(TaskSession).where(
+            TaskSession.worker_id == current_user.id,
+            TaskSession.status == SessionStatus.ACTIVE,
+            TaskSession.application_id != payload.application_id,
+        )
+    )
+    if active_for_worker.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You already have another task being tracked. Finish or resume that task before starting a new one.",
+        )
+
     # Prevent double check-in
     existing = await db.execute(
         select(TaskSession).where(
@@ -54,6 +123,31 @@ async def check_in(
             status_code=status.HTTP_409_CONFLICT,
             detail="Already checked in for this application",
         )
+
+    previous_result = await db.execute(
+        select(TaskSession)
+        .where(TaskSession.application_id == payload.application_id)
+        .order_by(TaskSession.created_at.desc())
+    )
+    previous_session = previous_result.scalars().first()
+    if previous_session and previous_session.status == SessionStatus.COMPLETED:
+        worked_minutes = get_worked_minutes(previous_session)
+        if worked_minutes >= task.estimated_duration_minutes:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This task session has already met the minimum duration",
+            )
+
+        previous_session.checked_in_at = datetime.now(timezone.utc) - timedelta(minutes=worked_minutes)
+        previous_session.checked_out_at = None
+        previous_session.earnings = None
+        previous_session.status = SessionStatus.ACTIVE
+        previous_session.proof_notes = None
+        previous_session.proof_photo_url = None
+        db.add(previous_session)
+        await db.flush()
+        await db.refresh(previous_session)
+        return TaskSessionResponse.model_validate(previous_session)
 
     session = TaskSession(
         task_id=application.task_id,
@@ -89,10 +183,6 @@ async def check_out(
     task_result = await db.execute(select(Task).where(Task.id == session.task_id))
     task = task_result.scalar_one()
 
-    now = datetime.now(timezone.utc)
-    elapsed_minutes = (now - session.checked_in_at.replace(tzinfo=timezone.utc)).total_seconds() / 60
-    earnings = round(elapsed_minutes * task.pay_rate_per_minute, 2)
-
     # Save proof photo if provided
     photo_url = None
     if proof_photo and proof_photo.filename:
@@ -112,33 +202,32 @@ async def check_out(
                 f.write(chunk)
         photo_url = f"/media/{filename}"
 
-    session.checked_out_at = now
-    session.earnings = earnings
-    session.status = SessionStatus.COMPLETED
-    session.proof_notes = proof_notes
-    if photo_url:
-        session.proof_photo_url = photo_url
+    return await finalize_checkout(session, task, current_user, db, proof_notes, photo_url)
 
-    # ── Credit earnings to wallet ─────────────────────────────────────────────
-    wallet_result = await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))
-    wallet = wallet_result.scalar_one_or_none()
-    if not wallet:
-        wallet = Wallet(user_id=current_user.id)
-        db.add(wallet)
-        await db.flush()
-    wallet.available_balance = round(wallet.available_balance + earnings, 2)
-    txn = Transaction(
-        user_id=current_user.id,
-        type=TransactionType.CREDIT,
-        amount=earnings,
-        description=f"Earnings from task: {task.title}",
-        reference_id=str(session.id),
+
+@router.post("/{session_id}/checkout-simple", response_model=TaskSessionResponse)
+async def check_out_simple(
+    session_id: uuid.UUID,
+    payload: CheckOutRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Worker checks out without photo upload using a JSON payload."""
+    result = await db.execute(
+        select(TaskSession).where(
+            TaskSession.id == session_id,
+            TaskSession.worker_id == current_user.id,
+            TaskSession.status == SessionStatus.ACTIVE,
+        )
     )
-    db.add(txn)
-    # ──────────────────────────────────────────────────────────────────────────
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active session not found")
 
-    await db.flush()
-    return TaskSessionResponse.model_validate(session)
+    task_result = await db.execute(select(Task).where(Task.id == session.task_id))
+    task = task_result.scalar_one()
+
+    return await finalize_checkout(session, task, current_user, db, payload.proof_notes)
 
 
 @router.get("/{session_id}/earnings", response_model=EarningsResponse)

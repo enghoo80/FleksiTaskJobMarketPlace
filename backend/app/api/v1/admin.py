@@ -1,3 +1,4 @@
+import json
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,12 +11,25 @@ from app.models.application import Application, ApplicationStatus
 from app.models.task import Task
 from app.models.user import User
 from app.models.task_session import TaskSession, SessionStatus
-from app.schemas.application import ApplicationWithDetails
+from app.schemas.application import ApplicationResponse, ApplicationWithDetails
 from app.schemas.user import UserResponse, UserPublic
 from app.schemas.task import TaskResponse
 from app.core.deps import get_current_user
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
+
+
+def build_user_public(user: User) -> UserPublic:
+    skills = user.skills
+    if isinstance(skills, str):
+        skills = json.loads(skills)
+    return UserPublic.model_validate({
+        "id": user.id,
+        "full_name": user.full_name,
+        "profile_photo_url": user.profile_photo_url,
+        "location": user.location,
+        "skills": skills,
+    })
 
 
 async def require_admin(current_user: User = Depends(get_current_user)) -> User:
@@ -48,7 +62,8 @@ async def admin_list_applications(
 
     response = []
     for app in applications:
-        app_data = ApplicationWithDetails.model_validate(app)
+        app_base = ApplicationResponse.model_validate(app)
+        app_data = ApplicationWithDetails(**app_base.model_dump())
         task_result = await db.execute(select(Task).where(Task.id == app.task_id))
         task = task_result.scalar_one_or_none()
         if task:
@@ -59,7 +74,7 @@ async def admin_list_applications(
         worker_result = await db.execute(select(User).where(User.id == app.worker_id))
         worker = worker_result.scalar_one_or_none()
         if worker:
-            app_data.worker = UserPublic.model_validate(worker)
+            app_data.worker = build_user_public(worker)
         response.append(app_data)
     return response
 

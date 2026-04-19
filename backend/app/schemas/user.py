@@ -54,6 +54,13 @@ class UserPublic(BaseModel):
     location: str | None = None
     skills: list[str] | None = None
 
+    @field_validator("skills", mode="before")
+    @classmethod
+    def parse_skills(cls, v):
+        if isinstance(v, str):
+            return json.loads(v)
+        return v
+
     model_config = {"from_attributes": True}
 
 

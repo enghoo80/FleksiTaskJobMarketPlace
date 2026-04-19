@@ -109,6 +109,7 @@ async def update_task(
         setattr(task, field, value)
     db.add(task)
     await db.flush()
+    await db.refresh(task)
 
     count_result = await db.execute(select(func.count()).select_from(Application).where(Application.task_id == task.id))
     task_data = TaskResponse.model_validate(task)
