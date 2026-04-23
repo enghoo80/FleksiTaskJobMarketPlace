@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import api from '../api/client'
+import api, { apiBaseUrl } from '../api/client'
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
@@ -316,7 +316,7 @@ function ExportTab() {
     setLoading(true)
     try {
       const token = JSON.parse(localStorage.getItem('adminToken') || 'null')
-      const res = await fetch('/api/v1/admin/analytics/export/workers', {
+      const res = await fetch(`${apiBaseUrl}/admin/analytics/export/workers`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       if (!res.ok) throw new Error('Export failed')

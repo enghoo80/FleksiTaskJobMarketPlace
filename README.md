@@ -201,6 +201,78 @@ kubectl apply -f k8s/backend/hpa.yaml
 
 ---
 
+## Cheap Cloud Deployment (Single VPS)
+
+The lowest-cost production setup for this repo is one small VPS running the existing Docker Compose stack, with Caddy on the host terminating HTTPS.
+
+### Recommended Spec
+- Provider: Hetzner Cloud or similar VPS host
+- Size: 2 vCPU, 4 GB RAM, Ubuntu 24.04
+- DNS:
+	- `yourdomain.com` -> web app
+	- `admin.yourdomain.com` -> admin app
+	- `api.yourdomain.com` -> backend
+
+### 1. Prepare Environment Files
+
+Copy the backend template and set production values:
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+Set at least:
+- `SECRET_KEY`
+- `DATABASE_URL=postgresql+asyncpg://fleksi:<same-password-as-deploy-.env.prod>@postgres:5432/fleksitask`
+- `REDIS_URL=redis://redis:6379/0`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `ALLOWED_ORIGINS=["https://yourdomain.com","https://admin.yourdomain.com"]`
+
+Place your Firebase service account file at `backend/firebase-credentials.json`.
+
+### 2. Build for Production API Hosts
+
+Copy the production deployment template:
+
+```bash
+cp deploy/.env.prod.example deploy/.env.prod
+```
+
+Update the hostnames, API URL values, and `POSTGRES_PASSWORD` in `deploy/.env.prod`.
+
+### 3. Start the Stack
+
+```bash
+docker compose --env-file deploy/.env.prod -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d --build
+```
+
+### 4. Verify the Backend
+
+```bash
+curl http://localhost:8000/health
+docker compose ps
+```
+
+### 5. Configure Caddy on the VPS Host
+
+Use `deploy/Caddyfile` as the starting point. Export the three host variables before reloading Caddy:
+
+```bash
+export WEB_HOST=yourdomain.com
+export ADMIN_HOST=admin.yourdomain.com
+export API_HOST=api.yourdomain.com
+sudo systemctl reload caddy
+```
+
+### Notes
+- The web and admin frontends now support `VITE_API_BASE_URL` at build time.
+- The production override binds ports `3000`, `3001`, and `8000` to `127.0.0.1`, so they are reachable through Caddy on the VPS but not directly exposed to the internet.
+- Uploaded media is stored on the VPS disk via the `media_data` Docker volume. Back that volume up before resizing or rebuilding the server.
+- The mobile app still contains emulator-only API URLs and should be configured separately before mobile release.
+
+---
+
 ## Project Structure (Backend)
 
 ```

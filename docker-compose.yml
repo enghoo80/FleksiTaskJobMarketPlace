@@ -4,13 +4,13 @@ services:
     container_name: fleksitask-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: fleksitask
-      POSTGRES_USER: fleksi
-      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ${POSTGRES_DB:-fleksitask}
+      POSTGRES_USER: ${POSTGRES_USER:-fleksi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fleksi -d fleksitask"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fleksi} -d ${POSTGRES_DB:-fleksitask}"]
       interval: 10s
       timeout: 5s
       retries: 5
